@@ -10,4 +10,5 @@ Pseudo-TCP socket over UDP.<br/>
 ### Linux/Mac
 ./gradlew run
 ### Windows
-gradlew.bat maybe....
+Use cmd:<br/>
+gradlew run
