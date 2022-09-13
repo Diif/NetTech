@@ -3,58 +3,13 @@
  */
 package T1MulticastApp;
 
-import java.io.IOException;
-import java.net.DatagramPacket;
 import java.net.InetAddress;
-import java.net.MulticastSocket;
 import java.net.UnknownHostException;
 import java.util.*;
 
 public class App {
 
-    public static void main(String[] args) throws IOException, InterruptedException {
-//        MulticastSocket socket = new MulticastSocket(Model.APP_PORT);
-//        byte ip1 = (byte) Integer.parseInt("224");
-//        byte ip2 = (byte) Integer.parseInt("1");
-//        byte ip3 = (byte) Integer.parseInt("1");
-//        byte ip4 = (byte) Integer.parseInt("1");
-//
-//        byte[] ip = new byte[4];
-//        ip[0] = ip1;
-//        ip[1] = ip2;
-//        ip[2] = ip3;
-//        ip[3] = ip4;
-//
-//        InetAddress address = InetAddress.getByAddress(ip);
-//
-//        socket.joinGroup(address);
-//        DatagramPacket packet = new DatagramPacket(new byte[50], 50);
-//        packet.setAddress(address);
-//        packet.setPort(Model.APP_PORT);
-//
-//        Thread test = new Thread(() -> {
-//            try {
-//                System.out.println("THREAD STARTS");
-//                MulticastSocket newsocket = new MulticastSocket(Model.APP_PORT);
-//                newsocket.joinGroup(address);
-//                DatagramPacket p = new DatagramPacket(new byte[100], 100);
-//                while (true){
-//                    newsocket.receive(p);
-//                    System.out.println("THREAD " + new String(p.getData()));
-//                }
-//            } catch (IOException e) {
-//                System.err.println("THReAD FALLS");
-//                throw new RuntimeException(e);
-//            }
-//        });
-//        test.start();
-//
-//        while (true) {
-//            Thread.sleep(2000);
-//            packet.setData("TEST p".getBytes());
-//            socket.send(packet);
-//        }
-
+    public static void main(String[] args){
         try {
             InetAddress address = getAddressByString(args[0]);
             String name = getName(args[1]);

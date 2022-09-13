@@ -2,8 +2,6 @@ package T1MulticastApp;
 
 import java.util.HashSet;
 import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Map;
 
 public class Model {
     public static final String APP_JOIN_KEY = "ff4f367ddeacfd7036b74f4c37263dca024fa9b0cd442630a8226d486ceb4dea";
@@ -51,14 +49,6 @@ public class Model {
             newSet.add(name);
             users.put(ip, newSet);
         }
-        //TODO убрать блин
-//        for(Map.Entry<String, HashSet<String>> pair : users.entrySet()){
-//            String ipInSet = pair.getKey();
-//            HashSet<String> names = pair.getValue();
-//            for(String nameInSet : names){
-//                System.out.println("In set: "+ ipInSet + "  " + nameInSet);
-//            }
-//        }
     }
 
     static public HashMap<String,HashSet<String>> users(){
