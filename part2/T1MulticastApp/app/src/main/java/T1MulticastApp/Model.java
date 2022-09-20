@@ -2,6 +2,7 @@ package T1MulticastApp;
 
 import java.util.HashSet;
 import java.util.HashMap;
+import java.util.UUID;
 
 public class Model {
     public static final String APP_JOIN_KEY = "ff4f367ddeacfd7036b74f4c37263dca024fa9b0cd442630a8226d486ceb4dea";
@@ -17,6 +18,9 @@ public class Model {
     }
     public static final int APP_PORT = 11113;
     public static final int APP_USER_MAX_NAME = 10;
+    public static final int UUID_LEN = 36;
+
+    public static final UUID ID = UUID.randomUUID();
 
     public static IP_TYPE getIpType() {
         return ipType;
@@ -38,30 +42,30 @@ public class Model {
 
     private static String userName;
 
-    private final static HashMap<String, HashSet<String>> users = new HashMap<>();
+    private final static HashMap<String, HashMap<String, String>> users = new HashMap<>();
 
-    static public void addUser(String ip, String name){
-        HashSet<String> existedSet = users.get(ip);
-        if(null != existedSet){
-            existedSet.add(name);
+    static public void addUser(String ip, String id, String name){
+        HashMap<String, String> existedMap = users.get(ip);
+        if(null != existedMap){
+            existedMap.put(id,name);
         } else{
-            HashSet<String> newSet = new HashSet<>();
-            newSet.add(name);
-            users.put(ip, newSet);
+            HashMap<String, String> newMap = new HashMap<>();
+            newMap.put(id, name);
+            users.put(ip, newMap);
         }
     }
 
-    static public HashMap<String,HashSet<String>> users(){
+    static public HashMap<String,HashMap<String, String>> users(){
         return users;
     }
 
-    static public void removeUser(String ip, String name){
-        HashSet<String> set = users.get(ip);
-        if(null == set){
+    static public void removeUser(String ip, String id){
+        HashMap<String, String> map = users.get(ip);
+        if(null == map){
             return;
         }
-        set.remove(name);
-        if(set.isEmpty()){
+        map.remove(id);
+        if(map.isEmpty()){
             users.remove(ip);
         }
     }

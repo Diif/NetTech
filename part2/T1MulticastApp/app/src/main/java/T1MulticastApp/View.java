@@ -6,6 +6,7 @@ import javafx.scene.control.TextArea;
 import javafx.stage.Stage;
 
 import java.net.InetAddress;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 
@@ -47,13 +48,13 @@ public class View extends Application {
     public void updateView(){
         StringBuilder builder = new StringBuilder();
 
-        for(Map.Entry<String, HashSet<String>> x : Model.users().entrySet()) {
+        for(Map.Entry<String, HashMap<String, String>> x : Model.users().entrySet()) {
             String ip = x.getKey();
-            HashSet<String> names = x.getValue();
-            for (String name : names) {
+            HashMap<String,String> names = x.getValue();
+            for (Map.Entry<String,String> name : names.entrySet()) {
                 builder.append(ip);
                 builder.append("  ");
-                builder.append(name);
+                builder.append(name.getValue());
                 builder.append('\n');
             }
         }
