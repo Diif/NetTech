@@ -3,6 +3,7 @@ package view;
 import javafx.application.Platform;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
+import javafx.geometry.Pos;
 import javafx.scene.control.Button;
 import javafx.scene.control.ListView;
 import javafx.scene.control.SelectionMode;
@@ -40,6 +41,7 @@ public class SearchSection extends VBox {
         searchField = createSearchField();
         locationListView = createLocationListView();
 
+        searchPart.setAlignment(Pos.CENTER);
         searchPart.getChildren().addAll(searchField,searchButton);
         this.getChildren().addAll(searchPart, locationListView);
     }
@@ -59,8 +61,15 @@ public class SearchSection extends VBox {
             ImageView imageView = new ImageView(image);
             searchButton = new Button("", imageView);
         } catch (Exception e){
-            log.warning("GUI: can't create search button with image: " + e.getLocalizedMessage());
-            searchButton = new Button("GO");
+            try{
+                FileInputStream imageFile = new FileInputStream("app/src/main/resources/search.png");
+                Image image = new Image(imageFile);
+                ImageView imageView = new ImageView(image);
+                searchButton = new Button("", imageView);
+            } catch (Exception e2){
+                log.warning("GUI: can't create search button with image: " + e.getLocalizedMessage() + "\n" + e2.getLocalizedMessage());
+                searchButton = new Button("GO");
+            }
         }
 
         searchButton.setOnAction(actionEvent -> {

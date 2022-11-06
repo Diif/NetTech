@@ -22,7 +22,15 @@ public class ApiConsts {
             GRAPHHOPPER_KEY = scanner.nextLine();
             OPENWEATHER_KEY = scanner.nextLine();
         } catch (FileNotFoundException e){
-            log.warning("App can't load keys for API: " + e.getLocalizedMessage() + "\nPath: " + config.getAbsolutePath());
+            try {
+                config = new File("app/src/main/java/keys.txt");
+                Scanner scanner = new Scanner(config);
+                OPENTRIP_KEY = scanner.nextLine();
+                GRAPHHOPPER_KEY = scanner.nextLine();
+                OPENWEATHER_KEY = scanner.nextLine();
+            } catch (FileNotFoundException e2){
+                log.warning("App can't load keys for API: " + e.getLocalizedMessage() + "\n" + e2.getLocalizedMessage());
+            }
         }
     }
 
