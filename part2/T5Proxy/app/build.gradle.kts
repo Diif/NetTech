@@ -18,7 +18,7 @@ repositories {
 }
 
 dependencies {
-
+    implementation("dnsjava:dnsjava:3.5.2")
 }
 
 application {

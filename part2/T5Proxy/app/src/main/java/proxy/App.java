@@ -1,14 +1,15 @@
 package proxy;
 
 import lombok.extern.java.Log;
+import org.xbill.DNS.*;
+import org.xbill.DNS.Record;
 import proxy.server.Proxy;
 
 import java.io.IOException;
-import java.net.InetSocketAddress;
-import java.nio.channels.SelectionKey;
-import java.nio.channels.Selector;
-import java.nio.channels.ServerSocketChannel;
-import java.nio.channels.SocketChannel;
+import java.net.*;
+import java.nio.ByteBuffer;
+import java.nio.channels.*;
+import java.util.Arrays;
 import java.util.Set;
 
 @Log
@@ -18,89 +19,58 @@ public class App {
         try {
             port = getPort(args);
         } catch (Exception e){
-            System.out.println(e.getLocalizedMessage());
+            log.severe(e.getLocalizedMessage());
             return;
         }
 
         try {
             Proxy.startProxy(port);
-        } catch (IOException e){
-            System.out.println(e.getLocalizedMessage());
+        } catch (IOException e) {
+            log.severe(e.getLocalizedMessage() +'\n' + Arrays.toString(e.getStackTrace()));
         }
-//
-//        Selector selector;
+//        DatagramSocket socket = null;
+//        DatagramChannel socket = null;
 //        try {
-//            selector = Selector.open();
-//        }catch (IOException e){
-//            log.severe(e.getLocalizedMessage());
-//            return;
-//        }
+//            Record qry = Record.newRecord(Name.fromString("google.com."), Type.A, DClass.IN);
+//            Message message = Message.newQuery(qry);
 //
-//        SocketChannel socketChannel;
-//        try {
-//            socketChannel = SocketChannel.open();
-//        } catch (IOException e){
-//            log.info("Не удалось открыть соединение: " + e.getLocalizedMessage());
-//            return;
-//        }
+//            socket = DatagramChannel.open();
+//            socket.configureBlocking(false);
+//            socket.bind(null);
+//            byte[] data = message.toWire();
+//            log.warning(String.valueOf(socket.send(ByteBuffer.wrap(data).asReadOnlyBuffer(), new InetSocketAddress(InetAddress.getByName("8.8.8.8"),53))));
 //
-//        try {
-//            socketChannel.configureBlocking(false);
-//            socketChannel.connect(new InetSocketAddress("34.120.208.123", 443));
-//        } catch (IOException e){
-//            log.info("Не удалось законнектить сокет: " + e.getLocalizedMessage());
-//            try {
-//                socketChannel.close();
-//                return;
-//            } catch (IOException ignore){}
-//        }
-//
-//
-//        try {
-//            socketChannel.register(selector, SelectionKey.OP_READ | SelectionKey.OP_WRITE | SelectionKey.OP_CONNECT);
-//        } catch (IOException e){
-//            log.info("Не удалось зарегистрировать канал: " + e.getLocalizedMessage());
-//            try {
-//                socketChannel.close();
-//            } catch (IOException ignore){}
-//        }
-//
-//
-//        int i = 1;
-//        while (true){
-//            log.info("################TRY " + i++ + "##########");
-//            try {
-//                selector.select();
-//            } catch (IOException e){
-//                log.severe("Strange");
-//                return;
-//            }
-//            Set<SelectionKey> keySet = selector.selectedKeys();
-//            for(SelectionKey key : keySet){
-//                log.info("Interests: " + key.isWritable() + " and write " + key.isReadable() + " and conn " + key.isConnectable());
-//                SocketChannel chan = (SocketChannel) key.channel();
-//                if(chan.isConnectionPending()){
-//                    log.info("CONN PEND");
-//                }
-//                if (chan.isConnected()){
-//                    log.info("CONN");
-//                }
-//                if(chan.isOpen()){
-//                    log.info("OPEN");
-//                }
-//                try {
-//                    if(chan.finishConnect()){
-//                        log.info("SUCCEED");
-//                        socketChannel.close();
-//                        key.cancel();
-//                        return;
-//                    }
-//                } catch (IOException e){
-//                    log.severe("FAIL");
-//                }
-//            }
-//        }
+//            ByteBuffer byteBuffer = ByteBuffer.allocate(512);
+//            socket.configureBlocking(true);
+//            socket.receive(byteBuffer);
 
+//            socket = new DatagramSocket();
+//            socket.connect(InetAddress.getByName("8.8.8.8"),53);
+//            byte[] data = message.toWire();
+//            DatagramPacket packet = new DatagramPacket(data, data.length);
+//            packet.setSocketAddress(new InetSocketAddress(InetAddress.getByName("8.8.8.8"), 53));
+//            socket.send(packet);
+
+//        } catch (TextParseException e){
+//            log.severe("Bad parse");
+//        } catch (SocketException e) {
+//            log.severe("Bad socket " + e.getLocalizedMessage());
+//        } catch (UnknownHostException e) {
+//            log.severe("Bad dns ip");
+//        } catch (IOException e) {
+//            log.severe("Can't send " + e.getLocalizedMessage());
+//        }
+//
+//        try {
+//            DatagramPacket packet = new DatagramPacket(new byte[512],512);
+//            socket.receive(packet);
+//            Message message1 = new Message(ByteBuffer.wrap(packet.getData()));
+//            log.warning(message1.getSection(1).get(0).rdataToString());
+//            log.info(message1.toString());
+//            socket.close();
+//        } catch (IOException e){
+//            log.severe("Cat't get: " + e.getLocalizedMessage());
+//        }
 
 
     }

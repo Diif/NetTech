@@ -1,6 +1,8 @@
 package proxy.server;
 
 import lombok.extern.java.Log;
+import org.xbill.DNS.*;
+import org.xbill.DNS.Record;
 import proxy.server.messages.ClientMethodsMsg;
 import proxy.server.messages.ClientRequestMsg;
 import proxy.server.messages.ServerMethodChoiceMsg;
@@ -12,6 +14,7 @@ import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.nio.channels.*;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 
 @Log
@@ -20,16 +23,29 @@ public class Proxy {
     private static class ClientInfo{
         SelectionKey clientKey;
         SelectionKey hostKey;
-        InetSocketAddress hostAdr;
+        byte[] hostIp;
+        int hostPort;
         STATE state;
         final Queue<ByteBuffer> msgToClient = new ArrayDeque<ByteBuffer>();
         final Queue<ByteBuffer> msgFromClient = new ArrayDeque<ByteBuffer>();
         int pendingTries = 0;
         static final int MAX_TRIES = 3;
         enum STATE{
-            UNAUTHORIZED, WAITING_FOR_REQUEST, PENDING_CONNECTION, CONNECTED, REQUEST_FAILED
+            UNAUTHORIZED, WAITING_FOR_REQUEST, PENDING_CONNECTION, RESOLVING_DOMAIN, CONNECTED, REQUEST_FAILED
         }
+    }
 
+    private static class DnsInfo{
+        final Queue<ByteBuffer> msgToResolver = new ArrayDeque<ByteBuffer>();
+        private final HashMap<String, HashSet<ClientInfo>> waitingClients = new HashMap<>();
+        private final InetSocketAddress resolverAddr;
+
+        private final DatagramChannel dnsChannel;
+
+        DnsInfo(InetSocketAddress address, DatagramChannel dnsChannel){
+            this.resolverAddr = address;
+            this.dnsChannel = dnsChannel;
+        }
     }
     private final int MAX_AUTHORIZE_SIZE = 1 + 1 + 255;
     private final int MIN_AUTHORIZE_SIZE = 3;
@@ -38,9 +54,13 @@ public class Proxy {
     private final int MAX_SOCKS_REQUEST_SIZE = 1 + 1 + 1 + 1 + MAX_DOMAIN_NAME_SIZE + 2;
     private final int MIN_SOCKS_REQUEST_SIZE = 1 + 1 + 1 + 1 + MIN_DOMAIN_NAME_SIZE + 2;
     private final int MAX_MSG_SIZE = 1024 * 512;
+    private final int MAX_DNS_RESPONSE_SIZE = 512;
+    private final String DNS_ADDR = "8.8.8.8";
+    private final int DNS_PORT = 53;
     private final ServerSocketChannel serverSocket;
     private final Selector selector;
 
+    private final SelectionKey dnsKey;
 
     private Proxy(int port) throws IOException {
         selector = Selector.open();
@@ -49,7 +69,16 @@ public class Proxy {
         serverSocket.bind(new InetSocketAddress("localhost", port));
         serverSocket.configureBlocking(false);
         serverSocket.register(selector, SelectionKey.OP_ACCEPT);
-        log.info("Запуск прокси успешен, адрес: " + serverSocket.getLocalAddress());
+
+        // гугловский днс является рекурсивным так что норм
+        DatagramChannel dnsChannel = DatagramChannel.open();
+        dnsChannel.bind(null);
+        DnsInfo dnsInfo = new DnsInfo(new InetSocketAddress(InetAddress.getByName(DNS_ADDR), DNS_PORT), dnsChannel);
+        dnsChannel.connect(dnsInfo.resolverAddr);
+        dnsChannel.configureBlocking(false);
+        dnsKey = dnsChannel.register(selector, SelectionKey.OP_READ, dnsInfo);
+
+        log.info("Запуск прокси закончен, адрес: " + serverSocket.getLocalAddress());
     }
 
     private void StartSelection() throws IOException {
@@ -61,6 +90,12 @@ public class Proxy {
                 if(!key.isValid()){
                     continue;
                 }
+
+                if (key == dnsKey){
+                    handleDnsKey();
+                    continue;
+                }
+
                 if(key.isAcceptable()){
                     handleNewConnection();
                 }
@@ -91,6 +126,119 @@ public class Proxy {
         }
     }
 
+    private void handleDnsKey(){
+        if(dnsKey.isReadable()){
+            try {
+                readDnsResponse();
+            } catch (IOException e){
+                log.warning("Не удалось прочитать ответ резолвера (закрываю все ожидающие соединения): " + e.getLocalizedMessage());
+                DnsInfo dnsInfo = (DnsInfo) dnsKey.attachment();
+                for(Map.Entry<String, HashSet<ClientInfo>> domainWithClients : dnsInfo.waitingClients.entrySet()){
+                    byte[] domain = domainWithClients.getKey().getBytes(StandardCharsets.UTF_8);
+                    HashSet<ClientInfo> clients = domainWithClients.getValue();
+                    for (ClientInfo info : clients){
+                        sendRequestReply(
+                                SocksMsg.REPLY.HOST_UNREACHABLE,
+                                false,
+                                domain,
+                                0,
+                                info);
+                        info.state = ClientInfo.STATE.REQUEST_FAILED;
+                        info.clientKey.interestOps(SelectionKey.OP_WRITE);
+                    }
+                    clients.clear();
+                }
+            }
+        }
+
+        if(dnsKey.isWritable()){
+            try {
+                sendDnsQuery();
+            }catch (IOException e){
+                log.warning("Не удалось отправить сообщение резолверу (закрываю все ожидающие соединения): " + e.getLocalizedMessage());
+                DnsInfo dnsInfo = (DnsInfo) dnsKey.attachment();
+                for(Map.Entry<String, HashSet<ClientInfo>> domainWithClients : dnsInfo.waitingClients.entrySet()){
+                    byte[] domain = domainWithClients.getKey().getBytes(StandardCharsets.UTF_8);
+                    HashSet<ClientInfo> clients = domainWithClients.getValue();
+                    for (ClientInfo info : clients){
+                        sendRequestReply(
+                                SocksMsg.REPLY.GENERAL_ERROR,
+                                false,
+                                domain,
+                                0,
+                                info);
+                        info.state = ClientInfo.STATE.REQUEST_FAILED;
+                        info.clientKey.interestOps(SelectionKey.OP_WRITE);
+                    }
+                    clients.clear();
+                }
+            }
+        }
+    }
+
+    private void readDnsResponse() throws IOException {
+        DnsInfo dnsInfo =  (DnsInfo) dnsKey.attachment();
+        ByteBuffer byteBuffer = ByteBuffer.allocate(MAX_DNS_RESPONSE_SIZE);
+        if(0 == dnsInfo.dnsChannel.read(byteBuffer)){
+            return;
+        }
+
+        Message msg = new Message(byteBuffer.flip());
+        String domain = msg.getQuestion().getName().toString();
+        log.info("Пришел ответ от резолвера на домен:" + domain);
+        HashSet<ClientInfo> clients = dnsInfo.waitingClients.get(domain);
+        if (null == clients) {
+            domain = msg.getQuestion().getName().toString(true);
+            clients = dnsInfo.waitingClients.get(domain);
+        }
+        if(clients == null || clients.isEmpty()){
+            log.warning("Пришел ответ от резолвера на ненужый домен: " + domain);
+            return;
+        }
+
+        List<Record> records = msg.getSection(1);
+        if (msg.getRcode() != 0 || records.isEmpty()){
+            log.info("Пришел плохой ответ от резолвера (закрываю все ожидающие соединения).");
+            byte[] dmn = domain.getBytes(StandardCharsets.UTF_8);
+            for (ClientInfo info : clients){
+                sendRequestReply(
+                        SocksMsg.REPLY.HOST_UNREACHABLE,
+                        false,
+                        dmn,
+                        0,
+                        info);
+                info.state = ClientInfo.STATE.REQUEST_FAILED;
+                info.clientKey.interestOps(SelectionKey.OP_WRITE);
+            }
+            clients.clear();
+            return;
+        }
+
+        Record record = records.get(0);
+        byte[] address = InetAddress.getByName(record.rdataToString()).getAddress();
+        for (ClientInfo clientInfo : clients){
+            log.info("Соединение по домену...");
+            connectToIpv4(address, clientInfo.hostPort, clientInfo);
+        }
+        clients.clear();
+    }
+
+    private void sendDnsQuery() throws IOException {
+        DnsInfo info =(DnsInfo) dnsKey.attachment();
+
+        for(int i = 0, max = info.msgToResolver.size(); i < max; i++){
+            ByteBuffer msg = info.msgToResolver.poll();
+            int count = info.dnsChannel.send(msg, info.resolverAddr);
+            if(count <= 0){
+                log.warning("Не удалось отправить сообщение на резолвер.");
+                info.msgToResolver.add(msg);
+            }
+        }
+        if(info.msgToResolver.isEmpty()){
+            dnsKey.interestOps(SelectionKey.OP_READ);
+        }
+    }
+
     private void handleConnection(SelectionKey key){
         ClientInfo info = (ClientInfo) key.attachment();
 
@@ -105,8 +253,8 @@ public class Proxy {
                 log.warning("Не удалось закончить установку соединения (закрываю соединение): " + e.getLocalizedMessage());
                 sendRequestReply(SocksMsg.REPLY.HOST_UNREACHABLE,
                         true,
-                        info.hostAdr.getAddress().getAddress(),
-                        info.hostAdr.getPort(),
+                        info.hostIp,
+                        info.hostPort,
                         info);
                 info.state = ClientInfo.STATE.REQUEST_FAILED;
                 return;
@@ -118,7 +266,7 @@ public class Proxy {
                     info);
             info.state = ClientInfo.STATE.CONNECTED;
             info.clientKey.interestOps(SelectionKey.OP_READ | SelectionKey.OP_WRITE);
-            info.hostKey.interestOps(SelectionKey.OP_READ | SelectionKey.OP_WRITE);
+            info.hostKey.interestOps(SelectionKey.OP_READ);
             log.info("Подтверждение соединение отправлено: " + hostAddr.getAddress() +":"+ hostAddr.getPort());
         }
 
@@ -137,7 +285,7 @@ public class Proxy {
         ClientInfo info = new ClientInfo();
         try {
             clientChannel.configureBlocking(false);
-            info.clientKey = clientChannel.register(selector, SelectionKey.OP_READ | SelectionKey.OP_WRITE, info);
+            info.clientKey = clientChannel.register(selector, SelectionKey.OP_READ, info);
             info.state = ClientInfo.STATE.UNAUTHORIZED;
             log.info("Клиент подключился с сокета: " + clientChannel.getRemoteAddress());
         } catch (IOException e){
@@ -194,11 +342,11 @@ public class Proxy {
         }
         msg.flip();
         if (key == info.clientKey){
-            log.info("Клиент передает данные хосту");
+            log.fine("Клиент передает данные хосту");
             info.msgFromClient.add(msg);
             info.hostKey.interestOpsOr(SelectionKey.OP_WRITE);
         } else {
-            log.info("Хост передает данные клиенту");
+            log.fine("Хост передает данные клиенту");
             info.clientKey.interestOpsOr(SelectionKey.OP_WRITE);
             info.msgToClient.add(msg);
         }
@@ -228,8 +376,12 @@ public class Proxy {
                 }
             }
             case REQUEST_FAILED -> {
-                if(null != info.hostAdr){
-                    log.info("Закрытие канала после неудачного запроса на адрес: " + info.hostAdr.getAddress() + ":" + info.hostAdr.getPort());
+                if(null != info.hostIp){
+                    try {
+                        log.info("Закрытие канала после неудачного запроса на адрес: " + InetAddress.getByAddress(info.hostIp));
+                    } catch (UnknownHostException e){
+                        log.info("Закрытие канала после неудачного запроса на адрес.");
+                    }
                 } else{
                     log.info("Закрытие канала после неудачного запроса. Адрес не поддерживается.");
                 }
@@ -248,6 +400,7 @@ public class Proxy {
         requestBuffer.clear();
 
         ClientInfo info =(ClientInfo) key.attachment();
+        key.interestOps(SelectionKey.OP_WRITE);
         int numBytes = ((SocketChannel) key.channel()).read(requestBuffer);
         if (numBytes < MIN_SOCKS_REQUEST_SIZE){
             log.warning("Количество прочитанных байт запроса оказалось невалидным (закрываю соединение): " + numBytes);
@@ -269,69 +422,92 @@ public class Proxy {
         ClientRequestMsg clientRequestMsg = msg.getClientRequestMsg();
         if(clientRequestMsg.hasConnectCmd()){
             if(clientRequestMsg.hasIpv4()){
-                InetAddress address;
-                try {
-                    address = InetAddress.getByAddress(clientRequestMsg.getIp());
-                } catch (UnknownHostException e){
-                    log.info("При запросе о подключении не удалось получить адрес: " + e.getLocalizedMessage());
-                    sendRequestReply(
-                            SocksMsg.REPLY.HOST_UNREACHABLE,
-                            true,
-                            clientRequestMsg.getIp(),
-                            clientRequestMsg.getPort(),
-                            info);
-                    info.state = ClientInfo.STATE.REQUEST_FAILED;
-                    return;
-                }
-                if(openConnection(address, clientRequestMsg.getPort(),info)){
-                    info.hostAdr = new InetSocketAddress(address, clientRequestMsg.getPort());
-                    info.state = ClientInfo.STATE.PENDING_CONNECTION;
-                } else {
-                    log.info("Не удалось открыть соединение");
-                    sendRequestReply(SocksMsg.REPLY.HOST_UNREACHABLE,
-                            true,
-                            clientRequestMsg.getIp(),
-                            clientRequestMsg.getPort(),
-                            info);
-                    info.state = ClientInfo.STATE.REQUEST_FAILED;
-                }
+                connectToIpv4(clientRequestMsg.getIp(), clientRequestMsg.getPort(), info);
             }else if(clientRequestMsg.hasDomain()){
-                //todo
-                log.info("Нет поддержки доменных имен");
-                sendRequestReply(SocksMsg.REPLY.ADDRESS_NOT_SUPPORTED,
-                        false,
-                        clientRequestMsg.getDomain(),
-                        clientRequestMsg.getPort(),
-                        info);
-                info.state = ClientInfo.STATE.REQUEST_FAILED;
+                connectToDomain(clientRequestMsg, info);
             } else {
-                log.info("Нет поддержки доменных IPv6");
-                sendRequestReply(SocksMsg.REPLY.ADDRESS_NOT_SUPPORTED,
-                        false,
-                        clientRequestMsg.getIp(),
-                        clientRequestMsg.getPort(),
-                        info);
-                info.state = ClientInfo.STATE.REQUEST_FAILED;
+                connectToIpv6(clientRequestMsg, info);
             }
+
         } else {
-            log.info("Нет поддержки команд.");
-            if(clientRequestMsg.hasDomain()){
-                sendRequestReply(SocksMsg.REPLY.COMMAND_NOT_SUPPORTED,
-                        false,
-                        clientRequestMsg.getDomain(),
-                        clientRequestMsg.getPort(),
-                        info);
-            } else{
-                sendRequestReply(SocksMsg.REPLY.COMMAND_NOT_SUPPORTED,
-                        false,
-                        clientRequestMsg.getIp(),
-                        clientRequestMsg.getPort(),
-                        info);
-            }
-            info.state = ClientInfo.STATE.REQUEST_FAILED;
+            unsupportedCommands(clientRequestMsg, info);
         }
 
 
+    }
+
+    private void unsupportedCommands(ClientRequestMsg clientRequestMsg, ClientInfo info){
+        log.info("Нет поддержки команды для запроса.");
+        if(clientRequestMsg.hasDomain()){
+            sendRequestReply(SocksMsg.REPLY.COMMAND_NOT_SUPPORTED,
+                    false,
+                    clientRequestMsg.getDomain(),
+                    clientRequestMsg.getPort(),
+                    info);
+        } else{
+            sendRequestReply(SocksMsg.REPLY.COMMAND_NOT_SUPPORTED,
+                    false,
+                    clientRequestMsg.getIp(),
+                    clientRequestMsg.getPort(),
+                    info);
+        }
+        info.state = ClientInfo.STATE.REQUEST_FAILED;
+    }
+
+    private void connectToDomain(ClientRequestMsg clientRequestMsg, ClientInfo info){
+        log.info("Обработка запроса на коннект по домену");
+        if (resolveDomainName(new String(clientRequestMsg.getDomain(), StandardCharsets.UTF_8), info)){
+            info.hostPort = clientRequestMsg.getPort();
+            info.state = ClientInfo.STATE.RESOLVING_DOMAIN;
+        } else {
+            sendRequestReply(SocksMsg.REPLY.HOST_UNREACHABLE,
+                    false,
+                    clientRequestMsg.getDomain(),
+                    clientRequestMsg.getPort(),
+                    info);
+            info.state = ClientInfo.STATE.REQUEST_FAILED;
+        }
+    }
+
+    private void connectToIpv6(ClientRequestMsg clientRequestMsg, ClientInfo info){
+        log.info("Нет поддержки IPv6 для запроса");
+        sendRequestReply(SocksMsg.REPLY.ADDRESS_NOT_SUPPORTED,
+                false,
+                clientRequestMsg.getIp(),
+                clientRequestMsg.getPort(),
+                info);
+        info.state = ClientInfo.STATE.REQUEST_FAILED;
+    }
+    private void connectToIpv4(byte[] ip, int port, ClientInfo info){
+        InetAddress address;
+        try {
+            address = InetAddress.getByAddress(ip);
+        } catch (UnknownHostException e){
+            log.info("При запросе о подключении не удалось получить адрес: " + e.getLocalizedMessage());
+            sendRequestReply(
+                    SocksMsg.REPLY.HOST_UNREACHABLE,
+                    true,
+                    ip,
+                    port,
+                    info);
+            info.state = ClientInfo.STATE.REQUEST_FAILED;
+            info.clientKey.interestOps(SelectionKey.OP_WRITE);
+            return;
+        }
+        if(openConnection(address, port,info)){
+            info.hostIp = ip;
+            info.hostPort = port;
+            info.state = ClientInfo.STATE.PENDING_CONNECTION;
+        } else {
+            log.info("При запросе не удалось открыть соединение");
+            sendRequestReply(SocksMsg.REPLY.HOST_UNREACHABLE,
+                    true,
+                    ip,
+                    port,
+                    info);
+            info.state = ClientInfo.STATE.REQUEST_FAILED;
+            info.clientKey.interestOps(SelectionKey.OP_WRITE);
+        }
     }
 
     private void cancelKeyAndCloseChannel(SelectionKey key){
@@ -382,7 +558,41 @@ public class Proxy {
             log.info("не удалось вывести новое соединение: " + e.getLocalizedMessage());
         }
         return true;
+    }
 
+    private boolean resolveDomainName(String domain, ClientInfo clientInfo){
+        Record queryRecord;
+        DnsInfo dnsInfo =(DnsInfo) dnsKey.attachment();
+        String absDom = domain;
+        try {
+            absDom = domain + ".";
+            queryRecord = Record.newRecord(Name.fromString(absDom), Type.A,DClass.IN);
+            HashSet<ClientInfo> clients = dnsInfo.waitingClients.get(absDom);
+            if(null == clients){
+                clients = new HashSet<>();
+                dnsInfo.waitingClients.put(absDom, clients);
+            }
+            clients.add(clientInfo);
+        } catch (TextParseException e){
+            try {
+                absDom = domain;
+                queryRecord = Record.newRecord(Name.fromString(absDom), Type.A,DClass.IN);
+                HashSet<ClientInfo> clients = dnsInfo.waitingClients.get(absDom);
+                if(null == clients){
+                    clients = new HashSet<>();
+                }
+                clients.add(clientInfo);
+            } catch (TextParseException e1){
+                log.warning("Не удалось распарсить доменное имя: " + e1.getLocalizedMessage());
+                return false;
+            }
+        }
+
+        dnsInfo.msgToResolver.add(ByteBuffer.wrap(Message.newQuery(queryRecord).toWire()).asReadOnlyBuffer());
+        dnsKey.interestOps(SelectionKey.OP_READ | SelectionKey.OP_WRITE);
+        clientInfo.clientKey.interestOps(0);
+        log.info("Запрос на резолвинг был поставлен в очередь: " + authorizeBuffer);
+        return true;
     }
 
     private void sendRequestReply(SocksMsg.REPLY reply, boolean isIpv4, byte[] addr, int port, ClientInfo info){
@@ -423,49 +633,41 @@ public class Proxy {
         ServerMethodChoiceMsg msg = SocksMsg.createServerMethodChoice(method);
 
         info.msgToClient.add(msg.toByteBuffer());
+        info.clientKey.interestOps(SelectionKey.OP_WRITE | SelectionKey.OP_READ);
         info.state = ClientInfo.STATE.WAITING_FOR_REQUEST;
     }
 
-    private void sendToClient(SelectionKey key, ClientInfo info){
+    private void sendToClient(SelectionKey clientKey, ClientInfo info){
         Queue<ByteBuffer> queue = info.msgToClient;
-        if(queue.isEmpty()){
-//            if(info.clientKey.isWritable() && null != info.hostKey && info.hostKey)
-            key.interestOps(SelectionKey.OP_READ);
-            return;
-        }
-        SocketChannel channel = (SocketChannel) key.channel();
-        while (!queue.isEmpty()){
-            try {
-                log.info("Отправка данных клиенту!");
-                send(channel, queue.poll());
-            } catch (IOException e){
-                log.info("Не удалось отправить сообщение клиенту (закрываю соединение): "+ e.getLocalizedMessage());
-                cancelKeyAndCloseChannel(info.clientKey);
-                cancelKeyAndCloseChannel(info.hostKey);
-            }
-        }
-    }
-    private void sendFromClient(SelectionKey key, ClientInfo info){
-        Queue<ByteBuffer> queue = info.msgFromClient;
-        if(queue.isEmpty()){
-            key.interestOps(SelectionKey.OP_READ);
-            return;
-        }
-        SocketChannel channel = (SocketChannel) key.channel();
+        SocketChannel channel = (SocketChannel) clientKey.channel();
 
-        while (!queue.isEmpty()){
+        log.fine("Отправка данных клиенту!");
+        sendAll(channel, info, queue, clientKey);
+    }
+    private void sendFromClient(SelectionKey hostKey, ClientInfo info){
+        Queue<ByteBuffer> queue = info.msgFromClient;
+        SocketChannel channel = (SocketChannel) hostKey.channel();
+
+        log.fine("Отправка данных от клиента!");
+        sendAll(channel, info, queue, hostKey);
+    }
+    private void sendAll(SocketChannel channel, ClientInfo info, Queue<ByteBuffer> queue, SelectionKey key){
+        for (int i =0, max = queue.size(); i < max; i++){
             try {
-                log.info("Отправка данных от клиента!");
-                send(channel, queue.poll());
+                ByteBuffer msg = queue.poll();
+                if(channel.write(msg) == 0){
+                    queue.add(msg);
+                }
             } catch (IOException e){
-                log.info("Не удалось отправить сообщение от клиента (закрываю соединение): "+ e.getLocalizedMessage());
+                log.info("Не удалось отправить сообщение (закрываю соединение): "+ e.getLocalizedMessage());
                 cancelKeyAndCloseChannel(info.clientKey);
                 cancelKeyAndCloseChannel(info.hostKey);
+                return;
             }
         }
-    }
-    private void send(SocketChannel channel, ByteBuffer data) throws IOException{
-        channel.write(data);
+        if(queue.isEmpty()){
+            key.interestOps(SelectionKey.OP_READ);
+        }
     }
 
     public static void startProxy(int port) throws IOException{

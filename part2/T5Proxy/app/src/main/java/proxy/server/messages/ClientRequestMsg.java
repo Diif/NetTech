@@ -46,8 +46,9 @@ public class ClientRequestMsg extends SocksMsg{
 
         int portIndex = byteBuffer.position() - 2;
         if(hasDomain){
-            domain = new byte[portIndex - 4];
-            for (int i = 4, j = 0; i < portIndex; i++, j++){
+            byte len = byteBuffer.get(4);
+            domain = new byte[len];
+            for (int i = 5, j = 0; j < len; i++, j++){
                 domain[j] = byteBuffer.get(i);
             }
         } else if (hasIpv4){
